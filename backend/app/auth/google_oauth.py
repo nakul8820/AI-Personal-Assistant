@@ -34,13 +34,15 @@ def _flow(state: str | None = None) -> Flow:
     )
 
 
-def authorization_url(state: str) -> str:
-    url, _ = _flow(state).authorization_url(
+def authorization_url(state: str) -> tuple[str, str | None]:
+    flow = _flow(state)
+    url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",  # force refresh_token on every consent
     )
-    return url
+    code_verifier = getattr(flow, "code_verifier", None)
+    return url, code_verifier
 
 
 def _creds_to_dict(c: Credentials) -> dict:
@@ -54,9 +56,11 @@ def _creds_to_dict(c: Credentials) -> dict:
     }
 
 
-def exchange_code(code: str, state: str) -> tuple[str, str]:
+def exchange_code(code: str, state: str, code_verifier: str | None = None) -> tuple[str, str]:
     """Finish the flow; persist tokens. Returns (user_id, email)."""
     flow = _flow(state)
+    if code_verifier:
+        flow.code_verifier = code_verifier
     flow.fetch_token(code=code)
     creds = flow.credentials
 

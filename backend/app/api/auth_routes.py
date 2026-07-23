@@ -17,14 +17,18 @@ def login(request: Request):
     referer = request.headers.get("referer")
     if referer:
         request.session["login_referer"] = referer
-    return RedirectResponse(google_oauth.authorization_url(state))
+    url, code_verifier = google_oauth.authorization_url(state)
+    if code_verifier:
+        request.session["code_verifier"] = code_verifier
+    return RedirectResponse(url)
 
 
 @router.get("/callback")
 def callback(request: Request, code: str | None = None, state: str | None = None):
     if not code or state != request.session.get("oauth_state"):
         return JSONResponse({"error": "INVALID_OAUTH_STATE"}, status_code=400)
-    user_id, email = google_oauth.exchange_code(code, state)
+    code_verifier = request.session.pop("code_verifier", None)
+    user_id, email = google_oauth.exchange_code(code, state, code_verifier=code_verifier)
     settings = get_settings()
     if settings.allowed_user_emails and email not in settings.allowed_user_emails:
         store.delete(user_id)
