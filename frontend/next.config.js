@@ -3,8 +3,9 @@ module.exports = {
   reactStrictMode: true,
   output: "standalone",
   async rewrites() {
-    let backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_API_URL || 'http://backend:8000';
-    backendUrl = backendUrl.replace(/\/+$/, '');
+    const rawUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_API_URL;
+    if (!rawUrl) return [];
+    const backendUrl = rawUrl.replace(/\/+$/, '');
     return [
       {
         source: '/auth/:path*',

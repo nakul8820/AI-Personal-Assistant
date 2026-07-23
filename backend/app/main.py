@@ -53,7 +53,7 @@ app = FastAPI(title="AI Personal Assistant")
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.session_secret,
-    same_site="lax",
+    same_site="none",
     https_only=True,
     max_age=settings.session_max_age_hours * 3600,
 )

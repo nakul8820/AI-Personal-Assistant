@@ -1,4 +1,6 @@
-export const API = "";
+export const API = typeof window !== "undefined"
+  ? (process.env.NEXT_PUBLIC_BACKEND_URL || "").replace(/\/+$/, "")
+  : (process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_API_URL || "").replace(/\/+$/, "");
 
 const tz = () =>
   Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
