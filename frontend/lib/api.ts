@@ -41,20 +41,63 @@ export type ActivityEntry = {
   total_tokens: number;
 };
 
+export function getAuthHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  if (typeof window !== "undefined") {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const tokenFromUrl = params.get("auth_token");
+      if (tokenFromUrl) {
+        localStorage.setItem("auth_token", tokenFromUrl);
+        // Clean URL query parameter without reloading
+        const cleanUrl = window.location.pathname + window.location.hash;
+        window.history.replaceState({}, document.title, cleanUrl);
+      }
+      const token = localStorage.getItem("auth_token");
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+    } catch {
+      // Ignore window/storage access errors
+    }
+  }
+  return headers;
+}
+
 export async function authStatus() {
-  const r = await fetch(`${API}/auth/status`, { credentials: "include" });
-  return r.json() as Promise<{ authenticated: boolean; email?: string; error_code?: string }>;
+  const r = await fetch(`${API}/auth/status`, { credentials: "include", headers: getAuthHeaders() });
+  const data = await r.json();
+  if (data && data.authenticated === false && typeof window !== "undefined") {
+    // If backend reports unauthenticated, clear local auth token
+    localStorage.removeItem("auth_token");
+  }
+  return data as { authenticated: boolean; email?: string; name?: string; error_code?: string };
 }
 
 export function loginUrl() {
+  if (typeof window !== "undefined") {
+    return `${API}/auth/login?redirect=${encodeURIComponent(window.location.origin)}`;
+  }
   return `${API}/auth/login`;
+}
+
+export async function logoutApi() {
+  const r = await fetch(`${API}/auth/logout`, {
+    method: "POST",
+    credentials: "include",
+    headers: getAuthHeaders(),
+  });
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("auth_token");
+  }
+  return r.json();
 }
 
 /** Fetch today's conversation history for UI restoration on page load. */
 export async function getHistory(): Promise<{ session_id: string; date: string; items: HistoryItem[] }> {
   const r = await fetch(`${API}/chat/history`, {
     credentials: "include",
-    headers: { "X-User-Timezone": tz() },
+    headers: getAuthHeaders({ "X-User-Timezone": tz() }),
   });
   if (r.status === 401) {
     throw new Error("SESSION_TIMEOUT");
@@ -67,7 +110,7 @@ export async function getHistory(): Promise<{ session_id: string; date: string; 
 export async function getTodayActivity(): Promise<{ date: string; actions: ActivityEntry[] }> {
   const r = await fetch(`${API}/chat/activity`, {
     credentials: "include",
-    headers: { "X-User-Timezone": tz() },
+    headers: getAuthHeaders({ "X-User-Timezone": tz() }),
   });
   if (r.status === 401) {
     throw new Error("SESSION_TIMEOUT");
@@ -85,7 +128,7 @@ export async function* chatStream(
   const res = await fetch(`${API}/chat/stream`, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json", "X-User-Timezone": tz() },
+    headers: getAuthHeaders({ "Content-Type": "application/json", "X-User-Timezone": tz() }),
     body: JSON.stringify({ session_id: sessionId, message, language: language ?? null }),
   });
   if (!res.ok) {
@@ -160,6 +203,7 @@ export async function transcribe(blob: Blob) {
   const r = await fetch(`${API}/voice/transcribe`, {
     method: "POST",
     credentials: "include",
+    headers: getAuthHeaders(),
     body: fd,
   });
   return r.json() as Promise<{ transcript?: string; language?: string; error_code?: string }>;
@@ -172,6 +216,7 @@ export async function speak(text: string, language: string) {
   const r = await fetch(`${API}/voice/speak`, {
     method: "POST",
     credentials: "include",
+    headers: getAuthHeaders(),
     body: fd,
   });
   const ct = r.headers.get("content-type") || "";

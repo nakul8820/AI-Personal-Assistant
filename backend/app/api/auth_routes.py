@@ -1,8 +1,11 @@
+import base64
+import json
 import secrets
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from app.api import deps
 from app.auth import google_oauth, store
 from app.core.config import get_settings
 from app.core.errors import GoogleAuthError
@@ -10,13 +13,33 @@ from app.core.errors import GoogleAuthError
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _encode_state(target_url: str) -> str:
+    payload = {
+        "nonce": secrets.token_urlsafe(16),
+        "redirect": target_url,
+    }
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def _decode_state(state: str) -> str | None:
+    try:
+        data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+        if isinstance(data, dict):
+            return data.get("redirect")
+    except Exception:
+        pass
+    return None
+
+
 @router.get("/login")
-def login(request: Request):
-    state = secrets.token_urlsafe(24)
+def login(request: Request, redirect: str | None = None):
+    settings = get_settings()
+    raw_target = redirect or request.headers.get("referer") or settings.frontend_origin
+    # Strip any trailing auth_token query params
+    clean_target = raw_target.split("?auth_token=")[0].split("&auth_token=")[0]
+    
+    state = _encode_state(clean_target)
     request.session["oauth_state"] = state
-    referer = request.headers.get("referer")
-    if referer:
-        request.session["login_referer"] = referer
     url = google_oauth.authorization_url(state)
     return RedirectResponse(url)
 
@@ -25,13 +48,11 @@ def login(request: Request):
 def callback(request: Request, code: str | None = None, state: str | None = None):
     if not code or not state:
         return JSONResponse({"error": "INVALID_OAUTH_PARAMS"}, status_code=400)
-    # Check session state if present (lenient for cross-domain browser cookie policies)
-    session_state = request.session.get("oauth_state")
-    if session_state and state != session_state:
-        return JSONResponse({"error": "INVALID_OAUTH_STATE"}, status_code=400)
-        
-    user_id, email = google_oauth.exchange_code(code, state)
+
     settings = get_settings()
+    base_redirect = _decode_state(state) or request.session.pop("login_referer", settings.frontend_origin)
+    
+    user_id, email = google_oauth.exchange_code(code, state)
     if settings.allowed_user_emails and email not in settings.allowed_user_emails:
         store.delete(user_id)
         return JSONResponse(
@@ -40,7 +61,10 @@ def callback(request: Request, code: str | None = None, state: str | None = None
         )
     request.session["user_id"] = user_id
     request.session.pop("oauth_state", None)
-    redirect_url = request.session.pop("login_referer", settings.frontend_origin)
+
+    # Append auth_token so cross-domain 3rd party cookie blocking (Chrome/Safari/Render) never breaks auth
+    sep = "&" if "?" in base_redirect else "?"
+    redirect_url = f"{base_redirect}{sep}auth_token={user_id}"
 
     # Use 200 OK HTML response so browsers commit the Set-Cookie header before cross-origin navigation
     html = f"""<!DOCTYPE html>
@@ -65,7 +89,7 @@ def callback(request: Request, code: str | None = None, state: str | None = None
 
 @router.get("/status")
 def status(request: Request):
-    user_id = request.session.get("user_id")
+    user_id = deps.get_user_id_from_request(request)
     if not user_id:
         return {"authenticated": False}
     # Touch active timestamp since status check is active usage
@@ -99,7 +123,8 @@ def status(request: Request):
 
 @router.post("/logout")
 def logout(request: Request):
-    user_id = request.session.pop("user_id", None)
+    user_id = deps.get_user_id_from_request(request)
+    request.session.pop("user_id", None)
     if user_id:
         store.delete(user_id)
     return {"ok": True}
