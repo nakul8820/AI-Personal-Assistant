@@ -1,7 +1,7 @@
 """Unified Database Adapter for PostgreSQL and SQLite.
 
 If DATABASE_URL is set (starting with postgresql:// or postgres://), connects to PostgreSQL.
-Otherwise, falls back to local SQLite at settings.db_path.
+If PostgreSQL is unreachable or unsupported, gracefully falls back to local SQLite at settings.db_path.
 """
 
 import json
@@ -102,7 +102,8 @@ CREATE TABLE IF NOT EXISTS action_log (
 CREATE INDEX IF NOT EXISTS idx_action_log_user_date ON action_log (user_id, date);
 """
 
-_initialized = False
+_pg_initialized = False
+_sqlite_initialized = False
 
 
 class UnifiedCursor:
@@ -143,57 +144,63 @@ class UnifiedCursor:
 
 @contextmanager
 def get_db() -> Generator[UnifiedCursor, None, None]:
-    global _initialized
+    global _pg_initialized, _sqlite_initialized
     settings = get_settings()
     db_url = settings.database_url.strip()
 
     is_postgres = db_url.startswith("postgresql://") or db_url.startswith("postgres://")
 
-    if is_postgres:
-        if not HAS_PSYCOPG2:
-            raise ImportError(
-                "psycopg2 is required to connect to PostgreSQL. Run `pip install psycopg2-binary`."
-            )
-        
-        # Render/Supabase/Neon give postgres:// or postgresql://
+    if is_postgres and HAS_PSYCOPG2:
         if db_url.startswith("postgres://"):
             db_url = "postgresql://" + db_url[len("postgres://"):]
 
-        conn = psycopg2.connect(db_url, cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor = conn.cursor()
         try:
-            if not _initialized:
-                cursor.execute(POSTGRES_TOKENS_SCHEMA)
-                cursor.execute(POSTGRES_MEMORY_SCHEMA)
+            conn = psycopg2.connect(
+                db_url,
+                cursor_factory=psycopg2.extras.RealDictCursor,
+                connect_timeout=5,
+            )
+            cursor = conn.cursor()
+            try:
+                if not _pg_initialized:
+                    cursor.execute(POSTGRES_TOKENS_SCHEMA)
+                    cursor.execute(POSTGRES_MEMORY_SCHEMA)
+                    conn.commit()
+                    _pg_initialized = True
+                yield UnifiedCursor(cursor, is_postgres=True)
                 conn.commit()
-                _initialized = True
-            yield UnifiedCursor(cursor, is_postgres=True)
+                return
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            logger.warning(
+                "PostgreSQL connection failed: %s. Falling back to local SQLite database.", e
+            )
+            is_postgres = False
+
+    # Local SQLite Fallback
+    conn = sqlite3.connect(settings.db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        if not _sqlite_initialized:
+            conn.executescript(SQLITE_TOKENS_SCHEMA)
+            conn.executescript(SQLITE_MEMORY_SCHEMA)
+            try:
+                conn.execute("ALTER TABLE tokens ADD COLUMN last_active_at TIMESTAMP")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cursor.close()
-            conn.close()
-    else:
-        conn = sqlite3.connect(settings.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        try:
-            if not _initialized:
-                conn.executescript(SQLITE_TOKENS_SCHEMA)
-                conn.executescript(SQLITE_MEMORY_SCHEMA)
-                try:
-                    conn.execute("ALTER TABLE tokens ADD COLUMN last_active_at TIMESTAMP")
-                except sqlite3.OperationalError:
-                    pass
-                conn.commit()
-                _initialized = True
-            yield UnifiedCursor(cursor, is_postgres=False)
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cursor.close()
-            conn.close()
+            _sqlite_initialized = True
+        yield UnifiedCursor(cursor, is_postgres=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
