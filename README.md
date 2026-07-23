@@ -1,11 +1,10 @@
 # Executive AI Personal Assistant
 
-A warm, bilingual (English / हिंदी / Hinglish) voice + text assistant that manages your
-**Google Calendar, Google Tasks, and Google Contacts** through natural language.
+A warm, bilingual (English / हिंदी / Hinglish) voice + text assistant that manages your **Google Calendar, Google Tasks, and Google Contacts** through natural language.
 
-- **Backend:** FastAPI · Gemini (function calling, raw REST) · Sarvam (STT/TTS) · Google APIs
-- **Frontend:** Next.js (App Router) with streaming tool cards, tappable confirmation/disambiguation UI, and mic input
-- **Safety:** a backend state machine enforces read-before-write, disambiguation, and destructive-action confirmation — independent of what the LLM outputs.
+- **Backend:** FastAPI · Groq / Gemini (bilingual tool calling) · OpenRouter (fallback) · Sarvam (STT/TTS) · Google APIs · PostgreSQL / Supabase / SQLite
+- **Frontend:** Next.js (App Router) with streaming tool cards, tappable confirmation/disambiguation UI, and mic voice input
+- **Safety & Security:** Backend state machine enforcing read-before-write, contact disambiguation, destructive-action hard gates, and email whitelisting — completely independent of LLM output.
 
 ---
 
@@ -25,24 +24,21 @@ Browser (Next.js)
                           │  + safety gate   │   CONFIRMATION
                           └────────┬─────────┘
              system prompt ┌───────┴────────┐ tool calls
-                 Gemini ◄──┤   loop (≤6)     ├──► Google Calendar / Tasks / Contacts
-                           └────────────────┘
+      Groq / Gemini / ◄────┤   loop (≤6)     ├──► Google Calendar / Tasks / Contacts
+      OpenRouter Fallback  └────────────────┘
                                    │ reply text
                                    ▼
                           /voice/speak ──► Sarvam TTS ──► audio playback
 ```
 
-The state machine is the single source of truth. Voice is a presentation layer: STT
-produces a text message that flows through the exact same `/chat` pipeline, and the reply
-is optionally spoken. A Sarvam outage degrades to text and never blocks a Calendar/Tasks
-action.
+The state machine is the single source of truth. Voice is a presentation layer: STT produces a text message that flows through the exact same `/chat` pipeline, and the reply is optionally spoken. A Sarvam outage degrades gracefully to text mode and never blocks Calendar or Task operations.
 
 ---
 
 ## Quick start (Docker)
 
 ```bash
-cp backend/.env.example backend/.env      # fill in the keys below
+cp backend/.env.example backend/.env      # fill in required keys (Google OAuth, Groq/Gemini API key)
 docker compose up --build
 # frontend → http://localhost:3000   backend → http://localhost:8000
 ```
@@ -50,37 +46,60 @@ docker compose up --build
 ## Quick start (local, no Docker)
 
 ```bash
-# backend
+# 1. Backend
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                       # fill in keys
+cp .env.example .env                       # fill in environment variables
 uvicorn app.main:app --reload
 
-# frontend (new terminal)
+# 2. Frontend (new terminal)
 cd frontend
 npm install
-echo "NEXT_PUBLIC_API_URL=http://localhost:8000" > .env.local
+cp .env.example .env.local                  # NEXT_PUBLIC_API_URL=http://localhost:8000
 npm run dev
 ```
 
 ---
 
-## Environment / API keys
+## Environment & Configuration
 
 Fill `backend/.env` (see `backend/.env.example`):
 
-| Var | Where to get it |
-|-----|-----------------|
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google Cloud Console → APIs & Services → Credentials → **OAuth client ID** (type *Web application*). Add redirect URI `http://localhost:8000/auth/callback`. Enable the **Calendar API, Tasks API, People API**. |
-| `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
-| `SARVAM_API_KEY` | https://dashboard.sarvam.ai |
-| `SESSION_SECRET` | any long random string |
-| `TOKEN_ENCRYPTION_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| Variable | Default / Description | Where to get / Instructions |
+|---|---|---|
+| `LLM_PROVIDER` | `groq` | Choose `groq` or `gemini` as primary model provider. |
+| `GROQ_API_KEY` | *(required if using Groq)* | Obtain from [Groq Console](https://console.groq.com/keys). |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | High-speed LLM model on Groq. |
+| `GEMINI_API_KEY` | *(required if using Gemini)* | Obtain from [Google AI Studio](https://aistudio.google.com/apikey). |
+| `GEMINI_MODEL` | `gemini-1.5-flash` | Gemini model identifier. |
+| `OPENROUTER_API_KEY` | *(optional)* | Fallback key if Groq reaches rate limits. |
+| `OPENROUTER_MODEL` | `openai/gpt-4o-mini-search-preview:free` | Fallback model identifier. |
+| `SARVAM_API_KEY` | *(optional)* | Obtain from [Sarvam AI Dashboard](https://dashboard.sarvam.ai). If omitted, system runs in text mode. |
+| `GOOGLE_CLIENT_ID` | *(required)* | Google Cloud Console → APIs & Services → Credentials → **OAuth client ID** (Web application). |
+| `GOOGLE_CLIENT_SECRET` | *(required)* | Google Cloud OAuth Client Secret. |
+| `OAUTH_REDIRECT_URI` | `http://localhost:8000/auth/callback` | Authorized redirect URI configured in Google Cloud Console. |
+| `FRONTEND_ORIGIN` | `http://localhost:3000` | Frontend web application origin for CORS & cookie policy. |
+| `DATABASE_URL` | *(optional)* | PostgreSQL / Supabase connection URL. If set, uses PostgreSQL; otherwise defaults to local SQLite. |
+| `DB_PATH` | `tokens.db` | SQLite database filepath used when `DATABASE_URL` is omitted. |
+| `ALLOWED_USER_EMAILS` | `[]` | JSON array of allowed emails (e.g. `["user@example.com"]`) to restrict access. |
+| `SESSION_SECRET` | *(required)* | Random secret key used to sign HTTP session cookies. |
+| `TOKEN_ENCRYPTION_KEY` | *(required)* | Fernet encryption key for Google tokens. Generate via `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. |
+| `ENABLE_DEBUG_ROUTES` | `true` | Set to `false` in production to disable debug endpoints. |
 
-OAuth requests **offline access** and the scopes `calendar`, `tasks`,
-`contacts.readonly`. Tokens are Fernet-encrypted and stored in SQLite (`DB_PATH`), so they
-survive restarts as long as `TOKEN_ENCRYPTION_KEY` is set.
+### OAuth & Security
+OAuth requests **offline access** and scopes: `calendar`, `tasks`, `contacts.readonly`, `openid`, and `userinfo.email`. 
+Tokens are Fernet-encrypted and stored securely in PostgreSQL or SQLite. Access can be locked down strictly to authorized user emails via `ALLOWED_USER_EMAILS`.
+
+---
+
+## Database & Persistence
+
+The assistant supports dual storage engines managed automatically by `app/db/connection.py`:
+
+- **Development:** Local SQLite database (`tokens.db`).
+- **Production:** PostgreSQL / Supabase database specified via `DATABASE_URL`. Includes automatic resolution of Supabase IPv6 direct URLs to verified IPv4 Pooler hosts.
+- **Stored Data:** Encrypted Google OAuth tokens (`tokens`), user daily conversation history & state (`day_sessions`), and audit logs (`action_log`).
 
 ---
 
@@ -102,8 +121,7 @@ Every system-prompt rule (`backend/app/llm/prompt.py`) has a concrete enforcer:
 | 9. Error recovery | typed exceptions in `core/errors.py`, translated in `tools/_google.py`; surfaced by `orchestrator._friendly()` |
 | 10. Voice formatting | prompt §10 + concise code-generated confirmations |
 
-The yes/no and scope parsing (`llm/intent.py`) lives in **code, not the LLM**, so the
-confirmation gate never depends on the model remembering it.
+The yes/no and scope parsing (`llm/intent.py`) lives in **code, not the LLM**, so the confirmation gate never depends on the model remembering it.
 
 ---
 
@@ -112,46 +130,38 @@ confirmation gate never depends on the model remembering it.
 ```bash
 cd backend && source .venv/bin/activate
 python app/llm/intent.py      # keyword parser self-check
-python tests/test_safety.py   # 5 safety flows, fully offline (Gemini + Google mocked)
+python tests/test_safety.py   # 5 safety flows, fully offline (LLM + Google mocked)
 ```
 
-`test_safety.py` proves the four required Sprint-3 flows **and** that an adversarial model
-telling the backend to "skip confirmation" still cannot delete anything.
+`test_safety.py` proves the required Sprint-3 safety flows **and** verifies that an adversarial model attempting to skip confirmation cannot trigger destructive actions.
 
 ---
 
-## Resilience matrix
+## Resilience Matrix
 
 See [`docs/RESILIENCE.md`](docs/RESILIENCE.md) for the scenario checklist. Summary:
 
 | Scenario | Behaviour |
 |---|---|
 | Auth expiry | `AUTH_EXPIRED` error → UI shows *Connect Google Account*; never claims success |
-| No results | model says "nothing found, want to rephrase?" |
-| Rate limit (429) | `tools/_google.py` retries 3× with exponential backoff, then a friendly retry message |
-| Google 5xx / network | typed `GOOGLE_API_ERROR`, no crash |
+| No results | Model says "nothing found, want to rephrase?" |
+| Rate limit (429) | `tools/_google.py` retries 3× with exponential backoff; fallback to OpenRouter when enabled |
+| Google 5xx / network | Typed `GOOGLE_API_ERROR`, no crash |
 | Sarvam outage | `/voice/*` returns 200 with a fallback note; text chat unaffected |
-| Runaway loop | capped at 6 tool round-trips → graceful "could you rephrase?" |
+| Runaway loop | Capped at 6 tool round-trips → graceful "could you rephrase?" |
 
 ---
 
-## Deploy
+## Production Deployment
 
-**Frontend (Vercel):** import the repo, set **Root Directory = `frontend`**, add env var
-`NEXT_PUBLIC_API_URL=https://<your-backend-host>`. Next.js is auto-detected.
+For detailed, step-by-step instructions on deploying the full stack to production using **Vercel** (Frontend), **Render** (Backend), and **Supabase** (PostgreSQL), refer to the official deployment guide:
 
-**Backend (Render / Railway / Fly.io):** deploy `backend/` (Dockerfile included). Set all
-env vars, set `OAUTH_REDIRECT_URI` and `FRONTEND_ORIGIN` to the production URLs, add the
-production redirect URI in Google Cloud Console, and set `ENABLE_DEBUG_ROUTES=false`.
+📖 **[Deployment Guide](docs/deployment_guide.md)**
 
-> Cross-site cookies: in production set `https_only=True` and `same_site="none"` on the
-> `SessionMiddleware` in `app/main.py` if the frontend and backend are on different domains.
+---
 
-## Known limitations
+## Known Limitations
 
-- **"This and following"** on recurring events is applied to the whole series (a true
-  RRULE split is not implemented) — occurrence-only and entire-series are exact.
-- **Session state is in-process** (`llm/session.py`) → single backend worker. Add Redis to
-  scale horizontally.
-- Mic capture uses `MediaRecorder` (all modern browsers; Safari may need a recent version).
-- Single LLM provider (Gemini) by design — keeps the tool-calling loop simple.
+- **"This and following"** on recurring events is applied to the whole series (a true RRULE split is not implemented) — occurrence-only and entire-series are exact.
+- **Session state is in-process** (`llm/session.py`) + backed by PostgreSQL/SQLite for state preservation across restarts.
+- Mic capture uses `MediaRecorder` (supported by all modern desktop and mobile browsers).

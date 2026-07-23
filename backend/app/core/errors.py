@@ -46,3 +46,10 @@ class SessionTimedOut(AppError):
     """Raised when the user has been idle longer than idle_timeout_minutes."""
     code = "SESSION_TIMEOUT"
     http_status = 401
+
+
+class SessionConflictError(AppError):
+    """Raised when optimistic concurrency check fails on day_sessions write."""
+    code = "SESSION_CONFLICT"
+    http_status = 409
+

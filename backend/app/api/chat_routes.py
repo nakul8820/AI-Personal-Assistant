@@ -25,6 +25,7 @@ def chat(req: ChatRequest, request: Request, user_id: str = Depends(current_user
     tz = _tz(request)
     session_id = session.make_session_id(user_id, tz)
     cs = session.get_or_create(session_id, user_id, tz)
+    initial_history_len = len(cs.history)
     logger.info("Sync chat turn | user=%s tz=%s | message=%r", user_id, tz, req.message)
 
     final = None
@@ -35,7 +36,7 @@ def chat(req: ChatRequest, request: Request, user_id: str = Depends(current_user
         elif event["kind"] == "final":
             final = event["response"]
 
-    cs.save()
+    cs.save_with_merge(initial_history_len)
 
     if final is None:
         final = {"type": "message", "text": "…"}
@@ -52,6 +53,7 @@ def chat_stream(req: ChatRequest, request: Request, user_id: str = Depends(curre
     tz = _tz(request)
     session_id = session.make_session_id(user_id, tz)
     cs = session.get_or_create(session_id, user_id, tz)
+    initial_history_len = len(cs.history)
 
     logger.info("Stream turn start | user=%s tz=%s session=%s | message=%r", user_id, tz, session_id, req.message)
 
@@ -60,7 +62,7 @@ def chat_stream(req: ChatRequest, request: Request, user_id: str = Depends(curre
             payload = json.dumps(event)
             logger.debug("Emitting SSE event kind=%s | len=%d", event.get("kind"), len(payload))
             yield f"data: {payload}\n\n"
-        cs.save()
+        cs.save_with_merge(initial_history_len)
         logger.info("Stream turn completed & saved | user=%s | turns=%d", user_id, len(cs.history))
 
     return StreamingResponse(

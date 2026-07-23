@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS day_sessions (
     known_items     TEXT NOT NULL DEFAULT '{}',
     state           VARCHAR NOT NULL DEFAULT 'AWAITING_INPUT',
     pending_action  TEXT,
+    version         INTEGER NOT NULL DEFAULT 1,
     created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, date)
@@ -173,6 +174,10 @@ def get_db() -> Generator[UnifiedCursor, None, None]:
         if not _pg_initialized:
             cursor.execute(POSTGRES_TOKENS_SCHEMA)
             cursor.execute(POSTGRES_MEMORY_SCHEMA)
+            try:
+                cursor.execute("ALTER TABLE day_sessions ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1")
+            except Exception:
+                pass
             conn.commit()
             _pg_initialized = True
         yield UnifiedCursor(cursor)

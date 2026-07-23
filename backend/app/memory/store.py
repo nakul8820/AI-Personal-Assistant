@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from app.core.errors import SessionConflictError
 from app.db import get_db
 
 logger = logging.getLogger("memory.store")
@@ -46,7 +47,7 @@ def load_day_session(user_id: str, date: str) -> dict:
     """Return the day session dict for user+date, or a fresh empty one."""
     with get_db() as db:
         row = db.execute(
-            "SELECT history, known_items, state, pending_action FROM day_sessions "
+            "SELECT history, known_items, state, pending_action, version FROM day_sessions "
             "WHERE user_id=%s AND date=%s",
             (user_id, date),
         ).fetchone()
@@ -57,12 +58,14 @@ def load_day_session(user_id: str, date: str) -> dict:
             "known_items": {},
             "state": "AWAITING_INPUT",
             "pending_action": None,
+            "version": 0,
         }
     return {
         "history": json.loads(row["history"]) if isinstance(row["history"], str) else row["history"],
         "known_items": json.loads(row["known_items"]) if isinstance(row["known_items"], str) else row["known_items"],
         "state": row["state"],
         "pending_action": json.loads(row["pending_action"]) if row["pending_action"] and isinstance(row["pending_action"], str) else row["pending_action"],
+        "version": row.get("version", 1),
     }
 
 
@@ -73,30 +76,73 @@ def save_day_session(
     known_items: dict,
     state: str,
     pending_action: dict | None,
-) -> None:
-    """Upsert the day session. Called after every completed turn."""
+    expected_version: int = 0,
+) -> int:
+    """Upsert the day session with optimistic concurrency control.
+
+    If expected_version matches stored version (or 0 for a new row),
+    increments version by 1 and returns the new version integer.
+    If expected_version does not match, raises SessionConflictError.
+    """
     with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO day_sessions (user_id, date, history, known_items, state, pending_action, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id, date) DO UPDATE SET
-                history=EXCLUDED.history,
-                known_items=EXCLUDED.known_items,
-                state=EXCLUDED.state,
-                pending_action=EXCLUDED.pending_action,
-                updated_at=CURRENT_TIMESTAMP
-            """,
-            (
-                user_id,
-                date,
-                json.dumps(history),
-                json.dumps(known_items),
-                state,
-                json.dumps(pending_action) if pending_action else None,
-            ),
-        )
-    logger.debug("Saved day_session | user=%s date=%s | turns=%d", user_id, date, len(history))
+        if expected_version == 0:
+            cursor = db.execute(
+                """
+                INSERT INTO day_sessions
+                    (user_id, date, history, known_items, state, pending_action, version, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, date) DO UPDATE SET
+                    history=EXCLUDED.history,
+                    known_items=EXCLUDED.known_items,
+                    state=EXCLUDED.state,
+                    pending_action=EXCLUDED.pending_action,
+                    version=day_sessions.version + 1,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE day_sessions.version = 0
+                RETURNING version
+                """,
+                (
+                    user_id,
+                    date,
+                    json.dumps(history),
+                    json.dumps(known_items),
+                    state,
+                    json.dumps(pending_action) if pending_action else None,
+                ),
+            )
+        else:
+            cursor = db.execute(
+                """
+                UPDATE day_sessions
+                SET history=%s,
+                    known_items=%s,
+                    state=%s,
+                    pending_action=%s,
+                    version=version + 1,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE user_id=%s AND date=%s AND version=%s
+                RETURNING version
+                """,
+                (
+                    json.dumps(history),
+                    json.dumps(known_items),
+                    state,
+                    json.dumps(pending_action) if pending_action else None,
+                    user_id,
+                    date,
+                    expected_version,
+                ),
+            )
+        
+        row = cursor.fetchone()
+        if not row:
+            raise SessionConflictError(
+                f"Session state conflict for user={user_id} date={date}: expected version {expected_version}, but row was modified by another request."
+            )
+        new_version = row["version"]
+
+    logger.debug("Saved day_session | user=%s date=%s | version=%d turns=%d", user_id, date, new_version, len(history))
+    return new_version
 
 
 def trim_history_for_llm(history: list) -> list:

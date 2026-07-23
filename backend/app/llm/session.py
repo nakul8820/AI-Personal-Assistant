@@ -38,22 +38,62 @@ class ConversationState:
     pending_candidates: list[dict] | None = None
     pending_action: dict | None = None
     known_items: dict[str, dict] = field(default_factory=dict)
+    version: int = 0
 
     def llm_history(self) -> list[dict]:
         """Return trimmed history for LLM context (last MAX_HISTORY_TURNS turns)."""
         return trim_history_for_llm(self.history)
 
     def save(self) -> None:
-        """Persist current state to day_sessions table."""
-        save_day_session(
+        """Persist current state to day_sessions table with optimistic concurrency control."""
+        st_val = self.state.value if isinstance(self.state, State) else str(self.state)
+        new_version = save_day_session(
             user_id=self.user_id,
             date=self.date,
             history=self.history,
             known_items=self.known_items,
-            state=self.state.value,
+            state=st_val,
             pending_action=self.pending_action,
+            expected_version=self.version,
         )
-        logger.debug("Saved session | user=%s date=%s | turns=%d", self.user_id, self.date, len(self.history))
+        self.version = new_version
+        logger.debug("Saved session | user=%s date=%s | version=%d turns=%d", self.user_id, self.date, self.version, len(self.history))
+
+    def save_with_merge(self, initial_history_len: int, max_retries: int = 3) -> None:
+        """Save state with OCC. On conflict, performs state-merge to preserve all turns without re-executing tools."""
+        from app.core.errors import SessionConflictError
+        for attempt in range(max_retries):
+            try:
+                self.save()
+                return
+            except SessionConflictError:
+                logger.warning(
+                    "Session conflict on save attempt %d/%d for user=%s date=%s — merging state",
+                    attempt + 1, max_retries, self.user_id, self.date
+                )
+                latest = load_day_session(self.user_id, self.date)
+                latest_history = latest["history"]
+                
+                # New turns generated during this request
+                new_turns = self.history[initial_history_len:]
+                
+                # Merge history & known_items
+                merged_history = latest_history + new_turns
+                merged_known = {**latest.get("known_items", {}), **self.known_items}
+                
+                # Resolve state & pending_action
+                merged_pending = self.pending_action if self.pending_action is not None else latest.get("pending_action")
+                merged_state = self.state if self.pending_action is not None else latest.get("state", State.AWAITING_INPUT.value)
+                
+                # Update in-memory state with merged data and newer version
+                self.history = merged_history
+                self.known_items = merged_known
+                self.pending_action = merged_pending
+                self.state = State(merged_state) if isinstance(merged_state, str) else merged_state
+                self.version = latest.get("version", 0)
+                initial_history_len = len(self.history)
+        # Final attempt after retries
+        self.save()
 
 
 def _today_for_tz(tz_str: str) -> str:
@@ -95,6 +135,7 @@ def get_or_create(session_id: str, user_id: str, tz: str = "UTC") -> Conversatio
         history=history,
         known_items=saved["known_items"],
         pending_action=saved["pending_action"],
+        version=saved.get("version", 0),
     )
 
     if saved["history"]:
