@@ -4,6 +4,8 @@ Connects strictly to PostgreSQL using the DATABASE_URL environment variable.
 Automatically resolves IPv6-only Supabase direct URLs to verified IPv4 Pooler hosts.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 from contextlib import contextmanager
@@ -102,16 +104,27 @@ def _build_connection_candidates(raw_url: str) -> list[str]:
     candidates = [url]
 
     # Detect Supabase direct IPv6 domain `db.<ref>.supabase.co`
-    match = re.search(r"postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(.+)", url)
+    match = re.search(r"postgresql://([^:]+):(.+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(.+)", url)
     if match:
-        user, pwd, ref, dbname = match.groups()
+        user = match.group(1)
+        pwd_and_rest = match.group(2)
+        ref = match.group(3)
+        dbname = match.group(4)
+        
+        # Split password from host if @ was present in password
+        if "@" in pwd_and_rest:
+            pwd = pwd_and_rest.rsplit("@", 1)[0]
+        else:
+            pwd = pwd_and_rest
+
         pooler_user = f"postgres.{ref}" if not user.endswith(f".{ref}") else user
         regions = [
-            "aws-0-ap-southeast-1.pooler.supabase.com",  # Tested & Verified Working Region
+            "aws-0-ap-southeast-1.pooler.supabase.com",  # Primary database region (Singapore)
             "aws-0-ap-south-1.pooler.supabase.com",
             "aws-0-us-east-1.pooler.supabase.com",
             "aws-0-eu-central-1.pooler.supabase.com",
             "aws-0-us-west-1.pooler.supabase.com",
+            "aws-0-eu-west-1.pooler.supabase.com",
         ]
         for host in regions:
             candidates.append(f"postgresql://{pooler_user}:{pwd}@{host}:6543/{dbname}")
@@ -149,7 +162,8 @@ def get_db() -> Generator[UnifiedCursor, None, None]:
             break
         except Exception as e:
             last_err = e
-            logger.warning("PostgreSQL attempt failed for host %s: %s", db_url.split("@")[-1], e)
+            masked_host = db_url.split("@")[-1] if "@" in db_url else db_url
+            logger.warning("PostgreSQL attempt failed for host %s: %s", masked_host, e)
 
     if conn is None:
         raise RuntimeError(f"Could not connect to PostgreSQL/Supabase database. Error: {last_err}")
