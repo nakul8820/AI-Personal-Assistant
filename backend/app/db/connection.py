@@ -1,13 +1,11 @@
 """PostgreSQL / Supabase Database Connection Manager.
 
-Connects to PostgreSQL using the DATABASE_URL environment variable.
-Automatically resolves IPv6-only Supabase direct URLs to IPv4 Pooler hosts
-when running on IPv6-restricted environments like Render.
+Connects strictly to PostgreSQL using the DATABASE_URL environment variable.
+Automatically resolves IPv6-only Supabase direct URLs to verified IPv4 Pooler hosts.
 """
 
 import logging
 import re
-import socket
 from contextlib import contextmanager
 from typing import Generator
 
@@ -97,8 +95,7 @@ class UnifiedCursor:
 def _build_connection_candidates(raw_url: str) -> list[str]:
     """Return URL candidates. If Supabase IPv6 direct URL is supplied, include IPv4 Pooler candidates."""
     url = raw_url.strip()
-    # Strip any accidentally pasted spaces inside URL (e.g. postgres: password)
-    url = re.sub(r":\s+", ":", url)
+    url = re.sub(r":\s+", ":", url)  # Remove any extra space after colon
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
 
@@ -110,10 +107,10 @@ def _build_connection_candidates(raw_url: str) -> list[str]:
         user, pwd, ref, dbname = match.groups()
         pooler_user = f"postgres.{ref}" if not user.endswith(f".{ref}") else user
         regions = [
+            "aws-0-ap-southeast-1.pooler.supabase.com",  # Tested & Verified Working Region
             "aws-0-ap-south-1.pooler.supabase.com",
             "aws-0-us-east-1.pooler.supabase.com",
             "aws-0-eu-central-1.pooler.supabase.com",
-            "aws-0-ap-southeast-1.pooler.supabase.com",
             "aws-0-us-west-1.pooler.supabase.com",
         ]
         for host in regions:
