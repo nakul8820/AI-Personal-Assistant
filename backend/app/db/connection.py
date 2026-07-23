@@ -115,8 +115,13 @@ class UnifiedCursor:
         if self.is_postgres:
             # Replace ? with %s if SQLite query format passed
             query_pg = query.replace("?", "%s")
-            # Convert bytes blob to str / text if needed for PG
-            self.cursor.execute(query_pg, params)
+            clean_params = []
+            for p in params:
+                if isinstance(p, (bytes, memoryview)):
+                    clean_params.append(bytes(p).decode("utf-8", errors="replace"))
+                else:
+                    clean_params.append(p)
+            self.cursor.execute(query_pg, tuple(clean_params))
         else:
             # Replace %s with ? if Postgres query format passed
             query_lite = query.replace("%s", "?")
