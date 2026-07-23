@@ -1,5 +1,6 @@
 """Google Calendar tool functions. Pure-ish: (user_id, args) -> pydantic models."""
 
+import logging
 from datetime import datetime
 
 from app.core.errors import NotFoundError
@@ -9,6 +10,8 @@ from app.models.schemas import (
     DeleteResult,
 )
 from app.tools._google import guarded, service
+
+logger = logging.getLogger("tools.calendar")
 
 
 def _cal(user_id: str):
@@ -36,6 +39,7 @@ def search_calendar_events(
     date_range_start: datetime,
     date_range_end: datetime,
 ) -> list[CalendarEventSummary]:
+    logger.info("search_calendar_events | user=%s | query=%r | start=%s | end=%s", user_id, query, date_range_start, date_range_end)
     res = (
         _cal(user_id)
         .events()
@@ -50,7 +54,9 @@ def search_calendar_events(
         )
         .execute()
     )
-    return [_to_summary(e) for e in res.get("items", [])]
+    items = [_to_summary(e) for e in res.get("items", [])]
+    logger.info("search_calendar_events found | count=%d", len(items))
+    return items
 
 
 @guarded
@@ -62,6 +68,7 @@ def create_calendar_event(
     attendees: list[str] | None = None,
     description: str | None = None,
 ) -> CalendarEventSummary:
+    logger.info("create_calendar_event | title=%r | start=%s | end=%s | attendees=%s", title, start, end, attendees)
     body = {
         "summary": title,
         "start": {"dateTime": start.isoformat()},
@@ -77,13 +84,16 @@ def create_calendar_event(
         .insert(calendarId="primary", body=body, sendUpdates="all")
         .execute()
     )
-    return _to_summary(ev)
+    summary = _to_summary(ev)
+    logger.info("create_calendar_event created | id=%s", summary.id)
+    return summary
 
 
 @guarded
 def update_calendar_event(
     user_id: str, event_id: str, updates: CalendarEventUpdate
 ) -> CalendarEventSummary:
+    logger.info("update_calendar_event | id=%s", event_id)
     body: dict = {}
     if updates.title is not None:
         body["summary"] = updates.title
@@ -113,6 +123,7 @@ def update_calendar_event(
 
 @guarded
 def delete_calendar_event(user_id: str, event_id: str) -> DeleteResult:
+    logger.info("delete_calendar_event | id=%s", event_id)
     _cal(user_id).events().delete(
         calendarId="primary", eventId=event_id, sendUpdates="all"
     ).execute()

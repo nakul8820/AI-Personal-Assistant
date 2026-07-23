@@ -1,7 +1,10 @@
 """Production system prompt (Part 1). Temporal vars filled per-request."""
 
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger("llm.prompt")
 
 SYSTEM_PROMPT = """\
 You are an executive AI Personal Assistant managing the user's Google Calendar, Google Tasks, and Google Contacts. Your tone is warm, professional, concise, and focused on helping the user stay organized.
@@ -102,6 +105,12 @@ def build_system_prompt(user_timezone: str = "UTC") -> str:
         user_timezone = "UTC"
     now_utc = datetime.now(ZoneInfo("UTC"))
     now_local = now_utc.astimezone(tz)
+    logger.info(
+        "Temporal Grounding | user_tz=%s | user_local_time=%s | day=%s",
+        user_timezone,
+        now_local.isoformat(),
+        now_local.strftime("%A"),
+    )
     return SYSTEM_PROMPT.format(
         current_utc_time=now_utc.isoformat(),
         user_local_time=now_local.isoformat(),

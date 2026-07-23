@@ -1,5 +1,6 @@
 import logging
 import logging.config
+import sys
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,10 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.api import auth_routes, chat_routes, debug_routes, voice_routes
 from app.core.config import get_settings
 from app.core.errors import AppError, SessionTimedOut
+
+# Force unbuffered line-by-line output to sys.stdout for Render / Docker live logs
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
 
 settings = get_settings()
 
@@ -25,17 +30,27 @@ logging.config.dictConfig({
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
+            "stream": "ext://sys.stdout",
             "formatter": "default",
         }
     },
     "root": {"level": "INFO", "handlers": ["console"]},
     "loggers": {
-        # LLM layer — set to DEBUG to see raw request/response payloads
+        "app":            {"level": "INFO", "propagate": True},
+        "api.chat":       {"level": "INFO", "propagate": True},
+        "api.voice":      {"level": "INFO", "propagate": True},
+        "api.auth":       {"level": "INFO", "propagate": True},
         "llm.groq":       {"level": "INFO", "propagate": True},
         "llm.openrouter": {"level": "INFO", "propagate": True},
+        "llm.prompt":     {"level": "INFO", "propagate": True},
         "llm.orchestrator": {"level": "INFO", "propagate": True},
-        # Auth layer
+        "tools.calendar": {"level": "INFO", "propagate": True},
+        "tools.tasks":    {"level": "INFO", "propagate": True},
+        "tools.contacts": {"level": "INFO", "propagate": True},
         "auth":           {"level": "INFO", "propagate": True},
+        "db":             {"level": "INFO", "propagate": True},
+        "memory.store":   {"level": "INFO", "propagate": True},
+        "voice.sarvam":   {"level": "INFO", "propagate": True},
     },
 })
 
