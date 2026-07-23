@@ -126,6 +126,11 @@ def app_error_handler(_request: Request, exc: AppError):
     )
 
 
+@app.get("/")
+def root():
+    return {"status": "ok", "app": "AI Personal Assistant Backend API"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
