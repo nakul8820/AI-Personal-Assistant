@@ -104,6 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_action_log_user_date ON action_log (user_id, date
 
 _pg_initialized = False
 _sqlite_initialized = False
+_postgres_disabled = False
 
 
 class UnifiedCursor:
@@ -144,11 +145,14 @@ class UnifiedCursor:
 
 @contextmanager
 def get_db() -> Generator[UnifiedCursor, None, None]:
-    global _pg_initialized, _sqlite_initialized
+    global _pg_initialized, _sqlite_initialized, _postgres_disabled
     settings = get_settings()
     db_url = settings.database_url.strip()
 
-    is_postgres = db_url.startswith("postgresql://") or db_url.startswith("postgres://")
+    is_postgres = (
+        not _postgres_disabled
+        and (db_url.startswith("postgresql://") or db_url.startswith("postgres://"))
+    )
 
     if is_postgres and HAS_PSYCOPG2:
         if db_url.startswith("postgres://"):
@@ -158,7 +162,7 @@ def get_db() -> Generator[UnifiedCursor, None, None]:
             conn = psycopg2.connect(
                 db_url,
                 cursor_factory=psycopg2.extras.RealDictCursor,
-                connect_timeout=5,
+                connect_timeout=3,
             )
             cursor = conn.cursor()
             try:
@@ -178,9 +182,11 @@ def get_db() -> Generator[UnifiedCursor, None, None]:
                 conn.close()
         except Exception as e:
             logger.warning(
-                "PostgreSQL connection failed: %s. Falling back to local SQLite database.", e
+                "PostgreSQL connection failed (%s). Disabling PostgreSQL and switching to local SQLite (%s).",
+                e,
+                settings.db_path,
             )
-            is_postgres = False
+            _postgres_disabled = True
 
     # Local SQLite Fallback
     conn = sqlite3.connect(settings.db_path)
