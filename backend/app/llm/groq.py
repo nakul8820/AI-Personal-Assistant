@@ -51,26 +51,42 @@ def generate(system_prompt: str, contents: list[dict], tools: list[dict]) -> dic
 
     # Convert conversation contents (Gemini format) to OpenAI format
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in contents:
+    pending_tool_calls: list[dict] = []
+
+    for turn_idx, msg in enumerate(contents):
         role = msg.get("role", "user")
         parts = msg.get("parts", [])
 
         if role == "model":
+            if pending_tool_calls:
+                for ptc in pending_tool_calls:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": ptc["id"],
+                        "content": json.dumps({"status": "confirmation_requested"}),
+                    })
+                pending_tool_calls = []
+
             assistant_text = ""
             tool_calls = []
-            for part in parts:
+            turn_pending = []
+
+            for call_idx, part in enumerate(parts):
                 if "text" in part:
                     assistant_text += part["text"]
                 elif "functionCall" in part:
                     fc = part["functionCall"]
+                    call_id = f"call_{fc['name']}_{turn_idx}_{call_idx}"
                     tool_calls.append({
-                        "id": f"call_{fc['name']}",
+                        "id": call_id,
                         "type": "function",
                         "function": {
                             "name": fc["name"],
                             "arguments": json.dumps(fc.get("args", {}))
                         }
                     })
+                    turn_pending.append({"id": call_id, "name": fc["name"]})
+
             msg_obj: dict = {"role": "assistant"}
             if assistant_text:
                 msg_obj["content"] = assistant_text
@@ -78,18 +94,67 @@ def generate(system_prompt: str, contents: list[dict], tools: list[dict]) -> dic
                 msg_obj["tool_calls"] = tool_calls
                 if "content" not in msg_obj:
                     msg_obj["content"] = None
+                pending_tool_calls = turn_pending
             messages.append(msg_obj)
+
         else:
+            user_texts = []
+            func_responses = []
+
             for part in parts:
                 if "text" in part:
-                    messages.append({"role": "user", "content": part["text"]})
+                    user_texts.append(part["text"])
                 elif "functionResponse" in part:
-                    fr = part["functionResponse"]
+                    func_responses.append(part["functionResponse"])
+
+            if func_responses:
+                for fr in func_responses:
+                    fr_name = fr.get("name")
+                    matched_id = None
+                    for idx, ptc in enumerate(pending_tool_calls):
+                        if ptc["name"] == fr_name:
+                            matched_id = ptc["id"]
+                            pending_tool_calls.pop(idx)
+                            break
+                    if not matched_id:
+                        matched_id = f"call_{fr_name}_fallback"
+
                     messages.append({
                         "role": "tool",
-                        "tool_call_id": f"call_{fr['name']}",
+                        "tool_call_id": matched_id,
                         "content": json.dumps(fr.get("response", {}))
                     })
+
+                if pending_tool_calls:
+                    for ptc in pending_tool_calls:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": ptc["id"],
+                            "content": json.dumps({"status": "handled"}),
+                        })
+                    pending_tool_calls = []
+
+            if user_texts:
+                if pending_tool_calls:
+                    for ptc in pending_tool_calls:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": ptc["id"],
+                            "content": json.dumps({"status": "confirmation_requested_from_user"}),
+                        })
+                    pending_tool_calls = []
+
+                for ut in user_texts:
+                    messages.append({"role": "user", "content": ut})
+
+    if pending_tool_calls:
+        for ptc in pending_tool_calls:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": ptc["id"],
+                "content": json.dumps({"status": "pending"}),
+            })
+        pending_tool_calls = []
 
     def _clean_schema(obj):
         if isinstance(obj, dict):

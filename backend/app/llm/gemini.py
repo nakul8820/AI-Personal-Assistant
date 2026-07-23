@@ -12,9 +12,18 @@ def generate(system_prompt: str, contents: list[dict], tools: list[dict]) -> dic
     """Return the model's content (dict with `parts`). Raises GoogleAPIError."""
     s = get_settings()
     url = f"{_BASE}/{s.gemini_model}:generateContent"
+
+    # Clean contents for Gemini REST API: strip non-standard keys like usage, provider, metrics
+    clean_contents = []
+    for item in contents:
+        clean_contents.append({
+            "role": item.get("role", "user"),
+            "parts": item.get("parts", []),
+        })
+
     body = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": contents,
+        "contents": clean_contents,
         "tools": [{"function_declarations": tools}],
         "tool_config": {"function_calling_config": {"mode": "AUTO"}},
     }
