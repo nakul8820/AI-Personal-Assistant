@@ -1,0 +1,49 @@
+# Secrets & Environment Variables (NEVER COMMIT!)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# SQLite & Databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+tokens.db
+
+# Python & Backend
+__pycache__/
+*.py[cod]
+*$py.class
+backend/.venv/
+.venv/
+venv/
+ENV/
+env/
+*.log
+
+# Node & Frontend
+frontend/node_modules/
+node_modules/
+frontend/.next/
+.next/
+frontend/out/
+out/
+frontend/.vercel
+.vercel
+
+# Operating System & IDE
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.vscode/
+.idea/
+.antigravity/
+.gemini/

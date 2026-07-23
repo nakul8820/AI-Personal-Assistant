@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - token-data:/app/data
+    environment:
+      DB_PATH: /app/data/tokens.db
+      FRONTEND_ORIGIN: http://localhost:3000
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the browser bundle; the browser calls the backend on the host.
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  token-data:
