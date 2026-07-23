@@ -17,18 +17,20 @@ def login(request: Request):
     referer = request.headers.get("referer")
     if referer:
         request.session["login_referer"] = referer
-    url, code_verifier = google_oauth.authorization_url(state)
-    if code_verifier:
-        request.session["code_verifier"] = code_verifier
+    url = google_oauth.authorization_url(state)
     return RedirectResponse(url)
 
 
 @router.get("/callback")
 def callback(request: Request, code: str | None = None, state: str | None = None):
-    if not code or state != request.session.get("oauth_state"):
+    if not code or not state:
+        return JSONResponse({"error": "INVALID_OAUTH_PARAMS"}, status_code=400)
+    # Check session state if present (lenient for cross-domain browser cookie policies)
+    session_state = request.session.get("oauth_state")
+    if session_state and state != session_state:
         return JSONResponse({"error": "INVALID_OAUTH_STATE"}, status_code=400)
-    code_verifier = request.session.pop("code_verifier", None)
-    user_id, email = google_oauth.exchange_code(code, state, code_verifier=code_verifier)
+        
+    user_id, email = google_oauth.exchange_code(code, state)
     settings = get_settings()
     if settings.allowed_user_emails and email not in settings.allowed_user_emails:
         store.delete(user_id)
