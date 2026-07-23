@@ -49,8 +49,8 @@ def authorization_url(state: str) -> str:
     flow.code_verifier = _pkce_verifier(state)
     url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes=True,
-        prompt="select_account consent",  # force account selection + consent
+        include_granted_scopes="true",  # Lowercase string required by Google OAuth API
+        prompt="select_account consent",
     )
     return url
 
