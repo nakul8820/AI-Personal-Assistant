@@ -1,9 +1,13 @@
 """PostgreSQL / Supabase Database Connection Manager.
 
-Connects strictly to PostgreSQL using the DATABASE_URL environment variable.
+Connects to PostgreSQL using the DATABASE_URL environment variable.
+Automatically resolves IPv6-only Supabase direct URLs to IPv4 Pooler hosts
+when running on IPv6-restricted environments like Render.
 """
 
 import logging
+import re
+import socket
 from contextlib import contextmanager
 from typing import Generator
 
@@ -58,6 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_action_log_user_date ON action_log (user_id, date
 """
 
 _pg_initialized = False
+_validated_url: str | None = None
 
 
 class UnifiedCursor:
@@ -89,32 +94,68 @@ class UnifiedCursor:
         return [dict(r) for r in rows]
 
 
+def _build_connection_candidates(raw_url: str) -> list[str]:
+    """Return URL candidates. If Supabase IPv6 direct URL is supplied, include IPv4 Pooler candidates."""
+    url = raw_url.strip()
+    # Strip any accidentally pasted spaces inside URL (e.g. postgres: password)
+    url = re.sub(r":\s+", ":", url)
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+
+    candidates = [url]
+
+    # Detect Supabase direct IPv6 domain `db.<ref>.supabase.co`
+    match = re.search(r"postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(.+)", url)
+    if match:
+        user, pwd, ref, dbname = match.groups()
+        pooler_user = f"postgres.{ref}" if not user.endswith(f".{ref}") else user
+        regions = [
+            "aws-0-ap-south-1.pooler.supabase.com",
+            "aws-0-us-east-1.pooler.supabase.com",
+            "aws-0-eu-central-1.pooler.supabase.com",
+            "aws-0-ap-southeast-1.pooler.supabase.com",
+            "aws-0-us-west-1.pooler.supabase.com",
+        ]
+        for host in regions:
+            candidates.append(f"postgresql://{pooler_user}:{pwd}@{host}:6543/{dbname}")
+            candidates.append(f"postgresql://{pooler_user}:{pwd}@{host}:5432/{dbname}")
+
+    return candidates
+
+
 @contextmanager
 def get_db() -> Generator[UnifiedCursor, None, None]:
-    global _pg_initialized
+    global _pg_initialized, _validated_url
     if not HAS_PSYCOPG2:
         raise ImportError(
             "psycopg2 is required to connect to PostgreSQL. Run `pip install psycopg2-binary`."
         )
 
     settings = get_settings()
-    db_url = settings.database_url.strip()
-    if not db_url:
+    raw_url = settings.database_url.strip()
+    if not raw_url:
         raise RuntimeError("DATABASE_URL environment variable is not set.")
 
-    # Convert legacy postgres:// to postgresql:// if needed by psycopg2
-    if db_url.startswith("postgres://"):
-        db_url = "postgresql://" + db_url[len("postgres://"):]
+    conn = None
+    last_err = None
 
-    try:
-        conn = psycopg2.connect(
-            db_url,
-            cursor_factory=psycopg2.extras.RealDictCursor,
-            connect_timeout=10,
-        )
-    except Exception as e:
-        logger.error("Failed to connect to PostgreSQL using DATABASE_URL: %s", e)
-        raise RuntimeError(f"Database connection failed: {e}") from e
+    urls = [_validated_url] if _validated_url else _build_connection_candidates(raw_url)
+
+    for db_url in urls:
+        try:
+            conn = psycopg2.connect(
+                db_url,
+                cursor_factory=psycopg2.extras.RealDictCursor,
+                connect_timeout=5,
+            )
+            _validated_url = db_url
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning("PostgreSQL attempt failed for host %s: %s", db_url.split("@")[-1], e)
+
+    if conn is None:
+        raise RuntimeError(f"Could not connect to PostgreSQL/Supabase database. Error: {last_err}")
 
     cursor = conn.cursor()
     try:
