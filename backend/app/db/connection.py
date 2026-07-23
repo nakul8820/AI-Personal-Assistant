@@ -1,12 +1,12 @@
-"""Unified Database Adapter for PostgreSQL and SQLite.
+"""PostgreSQL / Supabase Database Adapter (SQLite removed per user request).
 
-If DATABASE_URL is set (starting with postgresql:// or postgres://), connects to PostgreSQL.
-If PostgreSQL is unreachable or unsupported, gracefully falls back to local SQLite at settings.db_path.
+Supports direct PostgreSQL connections as well as automatic IPv4 Pooler resolution
+for Supabase instances hosted on IPv6-restricted environments like Render.
 """
 
 import json
 import logging
-import sqlite3
+import re
 from contextlib import contextmanager
 from typing import Generator
 
@@ -21,18 +21,6 @@ from app.core.config import get_settings
 
 logger = logging.getLogger("db")
 
-
-# ── Schemas ───────────────────────────────────────────────────────────────────
-
-SQLITE_TOKENS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS tokens (
-    user_id         TEXT PRIMARY KEY,
-    email           TEXT,
-    blob            BLOB NOT NULL,
-    last_active_at  TIMESTAMP
-);
-"""
-
 POSTGRES_TOKENS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
     user_id         VARCHAR PRIMARY KEY,
@@ -40,36 +28,6 @@ CREATE TABLE IF NOT EXISTS tokens (
     blob            TEXT NOT NULL,
     last_active_at  TIMESTAMPTZ
 );
-"""
-
-SQLITE_MEMORY_SCHEMA = """
-CREATE TABLE IF NOT EXISTS day_sessions (
-    user_id         TEXT NOT NULL,
-    date            TEXT NOT NULL,
-    history         TEXT NOT NULL DEFAULT '[]',
-    known_items     TEXT NOT NULL DEFAULT '{}',
-    state           TEXT NOT NULL DEFAULT 'AWAITING_INPUT',
-    pending_action  TEXT,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, date)
-);
-
-CREATE TABLE IF NOT EXISTS action_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         TEXT NOT NULL,
-    date            TEXT NOT NULL,
-    timestamp       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    user_message    TEXT,
-    tool_name       TEXT NOT NULL,
-    tool_args       TEXT,
-    result_summary  TEXT,
-    provider        TEXT,
-    api_hits        INTEGER DEFAULT 0,
-    total_tokens    INTEGER DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_action_log_user_date ON action_log (user_id, date);
 """
 
 POSTGRES_MEMORY_SCHEMA = """
@@ -103,31 +61,23 @@ CREATE INDEX IF NOT EXISTS idx_action_log_user_date ON action_log (user_id, date
 """
 
 _pg_initialized = False
-_sqlite_initialized = False
-_postgres_disabled = False
+_working_db_url: str | None = None
 
 
 class UnifiedCursor:
-    """Wrapper that provides dict-style access for rows across SQLite and Postgres."""
-    def __init__(self, cursor, is_postgres: bool):
+    """Wrapper that provides dict-style access for rows across Postgres."""
+    def __init__(self, cursor):
         self.cursor = cursor
-        self.is_postgres = is_postgres
 
     def execute(self, query: str, params: tuple = ()):
-        if self.is_postgres:
-            # Replace ? with %s if SQLite query format passed
-            query_pg = query.replace("?", "%s")
-            clean_params = []
-            for p in params:
-                if isinstance(p, (bytes, memoryview)):
-                    clean_params.append(bytes(p).decode("utf-8", errors="replace"))
-                else:
-                    clean_params.append(p)
-            self.cursor.execute(query_pg, tuple(clean_params))
-        else:
-            # Replace %s with ? if Postgres query format passed
-            query_lite = query.replace("%s", "?")
-            self.cursor.execute(query_lite, params)
+        query_pg = query.replace("?", "%s")
+        clean_params = []
+        for p in params:
+            if isinstance(p, (bytes, memoryview)):
+                clean_params.append(bytes(p).decode("utf-8", errors="replace"))
+            else:
+                clean_params.append(p)
+        self.cursor.execute(query_pg, tuple(clean_params))
         return self
 
     def fetchone(self) -> dict | None:
@@ -143,66 +93,77 @@ class UnifiedCursor:
         return [dict(r) for r in rows]
 
 
+def _build_candidate_urls(raw_url: str) -> list[str]:
+    """Generate connection URL candidates, adding IPv4 Supabase poolers if direct IPv6 URL is provided."""
+    candidates = []
+    url = raw_url.strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    candidates.append(url)
+
+    # If Supabase direct domain `db.<ref>.supabase.co` is present, generate IPv4 pooler candidate URLs
+    match = re.search(r"postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(.+)", url)
+    if match:
+        user, pwd, ref, dbname = match.groups()
+        # Pooler requires username in format `postgres.<ref>`
+        pooler_user = f"postgres.{ref}" if not user.endswith(f".{ref}") else user
+        regions = [
+            "aws-0-ap-south-1.pooler.supabase.com",
+            "aws-0-us-east-1.pooler.supabase.com",
+            "aws-0-eu-central-1.pooler.supabase.com",
+            "aws-0-ap-southeast-1.pooler.supabase.com",
+            "aws-0-us-west-1.pooler.supabase.com",
+        ]
+        for region_host in regions:
+            candidates.append(f"postgresql://{pooler_user}:{pwd}@{region_host}:6543/{dbname}")
+            candidates.append(f"postgresql://{pooler_user}:{pwd}@{region_host}:5432/{dbname}")
+
+    return candidates
+
+
 @contextmanager
 def get_db() -> Generator[UnifiedCursor, None, None]:
-    global _pg_initialized, _sqlite_initialized, _postgres_disabled
+    global _pg_initialized, _working_db_url
+    if not HAS_PSYCOPG2:
+        raise ImportError(
+            "psycopg2 is required to connect to PostgreSQL. Run `pip install psycopg2-binary`."
+        )
+
     settings = get_settings()
-    db_url = settings.database_url.strip()
+    raw_url = settings.database_url.strip()
+    if not raw_url:
+        raise RuntimeError("DATABASE_URL is not set in environment variables.")
 
-    is_postgres = (
-        not _postgres_disabled
-        and (db_url.startswith("postgresql://") or db_url.startswith("postgres://"))
-    )
+    conn = None
+    last_err = None
 
-    if is_postgres and HAS_PSYCOPG2:
-        if db_url.startswith("postgres://"):
-            db_url = "postgresql://" + db_url[len("postgres://"):]
+    # Use cached working URL if already validated
+    urls_to_try = [_working_db_url] if _working_db_url else _build_candidate_urls(raw_url)
 
+    for db_url in urls_to_try:
         try:
             conn = psycopg2.connect(
                 db_url,
                 cursor_factory=psycopg2.extras.RealDictCursor,
-                connect_timeout=3,
+                connect_timeout=5,
             )
-            cursor = conn.cursor()
-            try:
-                if not _pg_initialized:
-                    cursor.execute(POSTGRES_TOKENS_SCHEMA)
-                    cursor.execute(POSTGRES_MEMORY_SCHEMA)
-                    conn.commit()
-                    _pg_initialized = True
-                yield UnifiedCursor(cursor, is_postgres=True)
-                conn.commit()
-                return
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                cursor.close()
-                conn.close()
+            _working_db_url = db_url
+            break
         except Exception as e:
-            logger.warning(
-                "PostgreSQL connection failed (%s). Disabling PostgreSQL and switching to local SQLite (%s).",
-                e,
-                settings.db_path,
-            )
-            _postgres_disabled = True
+            last_err = e
+            logger.warning("PostgreSQL connection attempt failed for %s: %s", db_url.split("@")[-1], e)
 
-    # Local SQLite Fallback
-    conn = sqlite3.connect(settings.db_path)
-    conn.row_factory = sqlite3.Row
+    if conn is None:
+        raise RuntimeError(f"Could not connect to PostgreSQL/Supabase database. Error: {last_err}")
+
     cursor = conn.cursor()
     try:
-        if not _sqlite_initialized:
-            conn.executescript(SQLITE_TOKENS_SCHEMA)
-            conn.executescript(SQLITE_MEMORY_SCHEMA)
-            try:
-                conn.execute("ALTER TABLE tokens ADD COLUMN last_active_at TIMESTAMP")
-            except sqlite3.OperationalError:
-                pass
+        if not _pg_initialized:
+            cursor.execute(POSTGRES_TOKENS_SCHEMA)
+            cursor.execute(POSTGRES_MEMORY_SCHEMA)
             conn.commit()
-            _sqlite_initialized = True
-        yield UnifiedCursor(cursor, is_postgres=False)
+            _pg_initialized = True
+        yield UnifiedCursor(cursor)
         conn.commit()
     except Exception:
         conn.rollback()
