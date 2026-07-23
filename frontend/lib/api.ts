@@ -119,17 +119,37 @@ export async function* chatStream(
     const { done, value } = await reader.read();
     if (done) {
       if (buf.trim()) {
-        const line = buf.split("\n").find((l) => l.startsWith("data: "));
-        if (line) yield JSON.parse(line.slice(6));
+        const lines = buf.split("\n");
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(trimmed.slice(6).trim());
+              yield data;
+            } catch (err) {
+              console.error("Error parsing final line:", trimmed, err);
+            }
+          }
+        }
       }
       break;
     }
     buf += decoder.decode(value, { stream: true });
-    const chunks = buf.split("\n\n");
-    buf = chunks.pop() || "";
-    for (const chunk of chunks) {
-      const line = chunk.split("\n").find((l) => l.startsWith("data: "));
-      if (line) yield JSON.parse(line.slice(6));
+    const parts = buf.split("\n\n");
+    buf = parts.pop() || "";
+    for (const part of parts) {
+      const lines = part.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(trimmed.slice(6).trim());
+            yield data;
+          } catch (err) {
+            console.error("Error parsing SSE line:", trimmed, err);
+          }
+        }
+      }
     }
   }
 }
