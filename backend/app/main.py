@@ -78,9 +78,15 @@ async def lifespan(app: FastAPI):
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="AI Personal Assistant", lifespan=lifespan)
 
-# Build list of origins from config + production defaults
-allowed_origins = [o.strip() for o in settings.frontend_origin.split(",") if o.strip()]
-for default_origin in ["http://localhost:3000", "https://ai-personal-assistant-chi.vercel.app"]:
+# Normalize allowed origins by stripping trailing slashes and spaces
+raw_origins = settings.frontend_origin.split(",") if settings.frontend_origin else []
+allowed_origins = [o.strip().rstrip("/") for o in raw_origins if o.strip()]
+
+for default_origin in [
+    "https://ai-personal-assistant-chi.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]:
     if default_origin not in allowed_origins:
         allowed_origins.append(default_origin)
 
@@ -94,7 +100,6 @@ app.add_middleware(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app|https://.*\.ngrok-free\.app|https://.*\.ngrok-free\.dev|http://localhost:\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
