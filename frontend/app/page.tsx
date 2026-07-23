@@ -8,6 +8,7 @@ import {
   getHistory,
   getTodayActivity,
   loginUrl,
+  logoutApi,
   speak,
   transcribe,
   type ActivityEntry,
@@ -273,7 +274,7 @@ export default function Home() {
   const handleLogout = async () => {
     localStorage.removeItem("g_login_time");
     try {
-      await fetch(`${API}/auth/logout`, { method: "POST", credentials: "include" });
+      await logoutApi();
     } catch (e) {
       console.error(e);
     }
